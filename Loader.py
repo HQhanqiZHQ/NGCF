@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 
+
 class Loader():
 
     def __init__(self):
@@ -16,8 +17,9 @@ class Loader():
         df_test
         """
         # load dataset
-        
-        df = pd.read_csv('usersha1-artmbid-artname-plays.tsv', delimiter='\t', header=None)
+
+        df = pd.read_csv('usersha1-artmbid-artname-plays.tsv', delimiter='\t',
+                         header=None)
         df = df.drop(df.columns[2], axis=1)
         df.columns = ['user', 'item', 'plays']
         df = df.dropna()
@@ -26,7 +28,8 @@ class Loader():
         # user
         sample_num = 100000
         unique_user_lst = list(np.unique(df['user']))
-        sample_user_idx = np.random.choice(len(unique_user_lst), sample_num, replace=False)
+        sample_user_idx = np.random.choice(len(unique_user_lst), sample_num,
+                                           replace=False)
         sample_user_lst = [unique_user_lst[idx] for idx in sample_user_idx]
         df = df[df['user'].isin(sample_user_lst)]
         df = df.reset_index(drop=True)
@@ -70,18 +73,18 @@ class Loader():
         test_i = df_test['item_id'].values.tolist()
 
         test_ratings = list(zip(test_u, test_i))  # test (user, item)
-        zipped = set(zip(uids, iids))             # train (user, item)
+        zipped = set(zip(uids, iids))  # train (user, item)
 
         for (u, i) in test_ratings:
 
             negatives = []
             negatives.append((u, i))
             for t in range(100):
-                j = np.random.randint(len(items))     # neg_item j
+                j = np.random.randint(len(items))  # neg_item j
                 while (u, j) in zipped:
                     j = np.random.randint(len(items))
                 negatives.append(j)
-            negativeList.append(negatives) # [(0,pos), neg, neg, ...]
+            negativeList.append(negatives)  # [(0,pos), neg, neg, ...]
 
         df_neg = pd.DataFrame(negativeList)
 
@@ -108,21 +111,22 @@ class Loader():
         df_test = df_test.reset_index(drop=True)
 
         # df_train
-        mask = df.groupby(['user_id'])['user_id'].transform(self.mask_first).astype(bool)
+        mask = df.groupby(['user_id'])['user_id'].transform(
+            self.mask_first).astype(bool)
         df_train = df.loc[mask]
 
         return df_train, df_test
 
     def get_train_instances(self, uids, iids, num_neg, num_items):
-        user_input, item_input, labels = [],[],[]
-        zipped = set(zip(uids, iids)) # train (user, item)
+        user_input, item_input, labels = [], [], []
+        zipped = set(zip(uids, iids))  # train (user, item)
 
         for (u, i) in zip(uids, iids):
 
             # positive item
             user_input.append(u)  # [u]
             item_input.append(i)  # [pos_i]
-            labels.append(1)      # [1]
+            labels.append(1)  # [1]
 
             # negative item
             for t in range(num_neg):
@@ -133,7 +137,6 @@ class Loader():
 
                 user_input.append(u)  # [u1, u1,  u1,  ...]
                 item_input.append(j)  # [pos_i, neg_j1, neg_j2, ...]
-                labels.append(0)      # [1, 0,  0,  ...]
+                labels.append(0)  # [1, 0,  0,  ...]
 
         return user_input, item_input, labels
-
