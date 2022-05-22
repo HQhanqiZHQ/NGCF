@@ -1,269 +1,138 @@
-'''
-Created on Oct 10, 2018
-Tensorflow Implementation of Neural Graph Collaborative Filtering (NGCF) model in:
-Wang Xiang et al. Neural Graph Collaborative Filtering. In SIGIR 2019.
-
-@author: Xiang Wang (xiangwang@u.nus.edu)
-'''
+import pandas as pd
 import numpy as np
-import random as rd
-import scipy.sparse as sp
-from time import time
 
-class Loader(object):
-    def __init__(self, path, batch_size):
-        self.path = path
-        self.batch_size = batch_size
+class Loader():
 
-        train_file = path + '/train.txt'
-        test_file = path + '/test.txt'
+    def __init__(self):
+        pass
 
-        #get number of users and items
-        self.n_users, self.n_items = 0, 0
-        self.n_train, self.n_test = 0, 0
-        self.neg_pools = {}
+    def load_dataset(self):
+        """
+        uids: train user
+        iids: train item
+        users: total user
+        items: total item
+        df_train
+        df_test
+        """
+        # load dataset
+        df = pd.read_csv(file_path + '/data/data.csv', delimiter='\t', header=None)
+        df = df.drop(df.columns[2], axis=1)
+        df.columns = ['user', 'item', 'plays']
+        df = df.dropna()
+        df = df.loc[df.plays != 0]
 
-        self.exist_users = []
+        # user
+        sample_num = 100000
+        unique_user_lst = list(np.unique(df['user']))
+        sample_user_idx = np.random.choice(len(unique_user_lst), sample_num, replace=False)
+        sample_user_lst = [unique_user_lst[idx] for idx in sample_user_idx]
+        df = df[df['user'].isin(sample_user_lst)]
+        df = df.reset_index(drop=True)
 
-        with open(train_file) as f:
-            for l in f.readlines():
-                if len(l) > 0:
-                    l = l.strip('\n').split(' ')
-                    items = [int(i) for i in l[1:]]
-                    uid = int(l[0])
-                    self.exist_users.append(uid)
-                    self.n_items = max(self.n_items, max(items))
-                    self.n_users = max(self.n_users, uid)
-                    self.n_train += len(items)
+        df_count = df.groupby(['user']).count()
+        df['count'] = df.groupby('user')['user'].transform('count')
+        df = df[df['count'] > 1]
 
-        with open(test_file) as f:
-            for l in f.readlines():
-                if len(l) > 0:
-                    l = l.strip('\n')
-                    try:
-                        items = [int(i) for i in l.split(' ')[1:]]
-                    except Exception:
-                        continue
-                    self.n_items = max(self.n_items, max(items))
-                    self.n_test += len(items)
-        self.n_items += 1
-        self.n_users += 1
+        # user, item
+        df['user_id'] = df['user'].astype("category").cat.codes
+        df['item_id'] = df['item'].astype("category").cat.codes
 
-        self.print_statistics()
+        # lookup
+        item_lookup = df[['item_id', 'item']].drop_duplicates()
+        item_lookup['item_id'] = item_lookup.item_id.astype(str)
 
-        self.R = sp.dok_matrix((self.n_users, self.n_items), dtype=np.float32)
+        df = df[['user_id', 'item_id', 'plays']]
+        df_train, df_test = self.train_test_split(df)
 
-        self.train_items, self.test_set = {}, {}
-        with open(train_file) as f_train:
-            with open(test_file) as f_test:
-                for l in f_train.readlines():
-                    if len(l) == 0: break
-                    l = l.strip('\n')
-                    items = [int(i) for i in l.split(' ')]
-                    uid, train_items = items[0], items[1:]
+        users = list(np.sort(df.user_id.unique()))
+        items = list(np.sort(df.item_id.unique()))
 
-                    for i in train_items:
-                        self.R[uid, i] = 1.
-                        # self.R[uid][i] = 1
+        rows = df_train['user_id'].astype(int)
+        cols = df_train['item_id'].astype(int)
+        values = list(df_train.plays)
 
-                    self.train_items[uid] = train_items
+        uids = np.array(rows.tolist())
+        iids = np.array(cols.tolist())
 
-                for l in f_test.readlines():
-                    if len(l) == 0: break
-                    l = l.strip('\n')
-                    try:
-                        items = [int(i) for i in l.split(' ')]
-                    except Exception:
-                        continue
+        # user negative item
+        df_neg = self.get_negatives(uids, iids, items, df_test)
 
-                    uid, test_items = items[0], items[1:]
-                    self.test_set[uid] = test_items
+        return uids, iids, df_train, df_test, df_neg, users, items, item_lookup
 
-    def get_adj_mat(self):
-        try:
-            t1 = time()
-            adj_mat = sp.load_npz(self.path + '/s_adj_mat.npz')
-            norm_adj_mat = sp.load_npz(self.path + '/s_norm_adj_mat.npz')
-            mean_adj_mat = sp.load_npz(self.path + '/s_mean_adj_mat.npz')
-            print('already load adj matrix', adj_mat.shape, time() - t1)
+    def get_negatives(self, uids, iids, items, df_test):
+        """
+        negative item
+        """
+        negativeList = []
+        test_u = df_test['user_id'].values.tolist()
+        test_i = df_test['item_id'].values.tolist()
 
-        except Exception:
-            adj_mat, norm_adj_mat, mean_adj_mat = self.create_adj_mat()
-            sp.save_npz(self.path + '/s_adj_mat.npz', adj_mat)
-            sp.save_npz(self.path + '/s_norm_adj_mat.npz', norm_adj_mat)
-            sp.save_npz(self.path + '/s_mean_adj_mat.npz', mean_adj_mat)
-        return adj_mat, norm_adj_mat, mean_adj_mat
+        test_ratings = list(zip(test_u, test_i))  # test (user, item)
+        zipped = set(zip(uids, iids))             # train (user, item)
 
-    def create_adj_mat(self):
-        t1 = time()
-        adj_mat = sp.dok_matrix((self.n_users + self.n_items, self.n_users + self.n_items), dtype=np.float32)
-        adj_mat = adj_mat.tolil()
-        R = self.R.tolil()
+        for (u, i) in test_ratings:
 
-        adj_mat[:self.n_users, self.n_users:] = R
-        adj_mat[self.n_users:, :self.n_users] = R.T
-        adj_mat = adj_mat.todok()
-        print('already create adjacency matrix', adj_mat.shape, time() - t1)
+            negatives = []
+            negatives.append((u, i))
+            for t in range(100):
+                j = np.random.randint(len(items))     # neg_item j
+                while (u, j) in zipped:
+                    j = np.random.randint(len(items))
+                negatives.append(j)
+            negativeList.append(negatives) # [(0,pos), neg, neg, ...]
 
-        t2 = time()
+        df_neg = pd.DataFrame(negativeList)
 
-        def normalized_adj_single(adj):
-            rowsum = np.array(adj.sum(1))
+        return df_neg
 
-            d_inv = np.power(rowsum, -1).flatten()
-            d_inv[np.isinf(d_inv)] = 0.
-            d_mat_inv = sp.diags(d_inv)
+    def mask_first(self, x):
 
-            norm_adj = d_mat_inv.dot(adj)
-            # norm_adj = adj.dot(d_mat_inv)
-            print('generate single-normalized adjacency matrix.')
-            return norm_adj.tocoo()
+        result = np.ones_like(x)
+        result[0] = 0  # [0,1,1,....]
 
-        def check_adj_if_equal(adj):
-            dense_A = np.array(adj.todense())
-            degree = np.sum(dense_A, axis=1, keepdims=False)
+        return result
 
-            temp = np.dot(np.diag(np.power(degree, -1)), dense_A)
-            print('check normalized adjacency matrix whether equal to this laplacian matrix.')
-            return temp
+    def train_test_split(self, df):
+        """
+        train, test 나누는 함수
+        """
+        df_test = df.copy(deep=True)
+        df_train = df.copy(deep=True)
 
-        norm_adj_mat = normalized_adj_single(adj_mat + sp.eye(adj_mat.shape[0]))
-        mean_adj_mat = normalized_adj_single(adj_mat)
+        # df_test
+        df_test = df_test.groupby(['user_id']).first()
+        df_test['user_id'] = df_test.index
+        df_test = df_test[['user_id', 'item_id', 'plays']]
+        df_test = df_test.reset_index(drop=True)
 
-        print('already normalize adjacency matrix', time() - t2)
-        return adj_mat.tocsr(), norm_adj_mat.tocsr(), mean_adj_mat.tocsr()
+        # df_train
+        mask = df.groupby(['user_id'])['user_id'].transform(self.mask_first).astype(bool)
+        df_train = df.loc[mask]
 
-    def negative_pool(self):
-        t1 = time()
-        for u in self.train_items.keys():
-            neg_items = list(set(range(self.n_items)) - set(self.train_items[u]))
-            pools = [rd.choice(neg_items) for _ in range(100)]
-            self.neg_pools[u] = pools
-        print('refresh negative pools', time() - t1)
+        return df_train, df_test
 
-    def sample(self):
-        if self.batch_size <= self.n_users:
-            users = rd.sample(self.exist_users, self.batch_size)
-        else:
-            users = [rd.choice(self.exist_users) for _ in range(self.batch_size)]
+    def get_train_instances(self, uids, iids, num_neg, num_items):
+        user_input, item_input, labels = [],[],[]
+        zipped = set(zip(uids, iids)) # train (user, item)
 
+        for (u, i) in zip(uids, iids):
 
-        def sample_pos_items_for_u(u, num):
-            pos_items = self.train_items[u]
-            n_pos_items = len(pos_items)
-            pos_batch = []
-            while True:
-                if len(pos_batch) == num: break
-                pos_id = np.random.randint(low=0, high=n_pos_items, size=1)[0]
-                pos_i_id = pos_items[pos_id]
+            # positive item
+            user_input.append(u)  # [u]
+            item_input.append(i)  # [pos_i]
+            labels.append(1)      # [1]
 
-                if pos_i_id not in pos_batch:
-                    pos_batch.append(pos_i_id)
-            return pos_batch
+            # negative item
+            for t in range(num_neg):
 
-        def sample_neg_items_for_u(u, num):
-            neg_items = []
-            while True:
-                if len(neg_items) == num: break
-                neg_id = np.random.randint(low=0, high=self.n_items,size=1)[0]
-                if neg_id not in self.train_items[u] and neg_id not in neg_items:
-                    neg_items.append(neg_id)
-            return neg_items
+                j = np.random.randint(num_items)
+                while (u, j) in zipped:
+                    j = np.random.randint(num_items)
 
-        def sample_neg_items_for_u_from_pools(u, num):
-            neg_items = list(set(self.neg_pools[u]) - set(self.train_items[u]))
-            return rd.sample(neg_items, num)
+                user_input.append(u)  # [u1, u1,  u1,  ...]
+                item_input.append(j)  # [pos_i, neg_j1, neg_j2, ...]
+                labels.append(0)      # [1, 0,  0,  ...]
 
-        pos_items, neg_items = [], []
-        for u in users:
-            pos_items += sample_pos_items_for_u(u, 1)
-            neg_items += sample_neg_items_for_u(u, 1)
-
-        return users, pos_items, neg_items
-
-    def get_num_users_items(self):
-        return self.n_users, self.n_items
-
-    def print_statistics(self):
-        print('n_users=%d, n_items=%d' % (self.n_users, self.n_items))
-        print('n_interactions=%d' % (self.n_train + self.n_test))
-        print('n_train=%d, n_test=%d, sparsity=%.5f' % (self.n_train, self.n_test, (self.n_train + self.n_test)/(self.n_users * self.n_items)))
-
-
-    def get_sparsity_split(self):
-        try:
-            split_uids, split_state = [], []
-            lines = open(self.path + '/sparsity.split', 'r').readlines()
-
-            for idx, line in enumerate(lines):
-                if idx % 2 == 0:
-                    split_state.append(line.strip())
-                    print(line.strip())
-                else:
-                    split_uids.append([int(uid) for uid in line.strip().split(' ')])
-            print('get sparsity split.')
-
-        except Exception:
-            split_uids, split_state = self.create_sparsity_split()
-            f = open(self.path + '/sparsity.split', 'w')
-            for idx in range(len(split_state)):
-                f.write(split_state[idx] + '\n')
-                f.write(' '.join([str(uid) for uid in split_uids[idx]]) + '\n')
-            print('create sparsity split.')
-
-        return split_uids, split_state
-
-
-
-    def create_sparsity_split(self):
-        all_users_to_test = list(self.test_set.keys())
-        user_n_iid = dict()
-
-        # generate a dictionary to store (key=n_iids, value=a list of uid).
-        for uid in all_users_to_test:
-            train_iids = self.train_items[uid]
-            test_iids = self.test_set[uid]
-
-            n_iids = len(train_iids) + len(test_iids)
-
-            if n_iids not in user_n_iid.keys():
-                user_n_iid[n_iids] = [uid]
-            else:
-                user_n_iid[n_iids].append(uid)
-        split_uids = list()
-
-        # split the whole user set into four subset.
-        temp = []
-        count = 1
-        fold = 4
-        n_count = (self.n_train + self.n_test)
-        n_rates = 0
-
-        split_state = []
-        for idx, n_iids in enumerate(sorted(user_n_iid)):
-            temp += user_n_iid[n_iids]
-            n_rates += n_iids * len(user_n_iid[n_iids])
-            n_count -= n_iids * len(user_n_iid[n_iids])
-
-            if n_rates >= count * 0.25 * (self.n_train + self.n_test):
-                split_uids.append(temp)
-
-                state = '#inter per user<=[%d], #users=[%d], #all rates=[%d]' %(n_iids, len(temp), n_rates)
-                split_state.append(state)
-                print(state)
-
-                temp = []
-                n_rates = 0
-                fold -= 1
-
-            if idx == len(user_n_iid.keys()) - 1 or n_count == 0:
-                split_uids.append(temp)
-
-                state = '#inter per user<=[%d], #users=[%d], #all rates=[%d]' % (n_iids, len(temp), n_rates)
-                split_state.append(state)
-                print(state)
-
-
-
-        return split_uids, split_state
+        return user_input, item_input, labels
 
