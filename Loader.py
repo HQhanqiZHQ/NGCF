@@ -16,7 +16,7 @@ class Loader():
         df_test
         """
         # load dataset
-        df = pd.read_csv(file_path + '/data/data.csv', delimiter='\t', header=None)
+        df = pd.read_csv(file_path + '/data/usersha1-artmbid-artname-plays.tsv', delimiter='\t', header=None)
         df = df.drop(df.columns[2], axis=1)
         df.columns = ['user', 'item', 'plays']
         df = df.dropna()
